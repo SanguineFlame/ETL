@@ -1,0 +1,15 @@
+def revised_test_weekend_day():
+    # Hardcode a specific year and month for testing
+    year, month = 2023, 8  # For example, August 2023
+    
+    # Calculate the last workday of the specified month
+    last_workday = last_workday_of_month(year, month)
+    
+    # Progressively increment the day until a weekend is reached
+    weekend_day = last_workday
+    while weekend_day.weekday() < 5:  # Move forward until we hit a weekend
+        weekend_day += timedelta(days=1)
+    
+    # Check if this weekend day is within the specified custom range
+    # The expectation is that it should not be within this range
+    assert not is_within_custom_range(weekend_day.year, weekend_day.month, weekend_day.day, 5, 2)
