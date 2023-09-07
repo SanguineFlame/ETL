@@ -3,9 +3,9 @@ import json
 import sys
 from pyspark.context import SparkContext
 from pyspark.sql import SparkSession
-from pyspark.sql import Row
 from awsglue.context import GlueContext
 from awsglue.utils import getResolvedOptions
+from pyspark.sql import Row
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -50,12 +50,10 @@ VALIDATIONS_CONFIG = {
         "function": validate_is_numeric,
         "message": "Non-numeric values."
     },
-
     "column_count": {
         "function": validate_column_count,
         "message": "Incorrect column count."
     },
-
     "min_row_count": {
         "function": validate_min_row_count,
         "message": "Minimum row count (5) not satisfied."
@@ -72,15 +70,18 @@ def log_failures(sample_failing_rows, column, validation_type, message, logs_out
         logging.info(f"Validation {validation_type} passed for {column}. No {message} found.")
 
 
-def run_validations(input_file_s3_path, logs_output_path, column_validations_config):
+def run_validations(input_file_s3_path, logs_output_path, column_validations_config, expected_count):
     df = spark.read.csv(input_file_s3_path, header=True, inferSchema=True)
-
     for column, column_validations in column_validations_config.items():
         for validation in column_validations:
             validation_function = VALIDATIONS_CONFIG[validation]["function"]
-            failing_df = validation_function(df, column)
 
-            # Only collect sample failing rows if there are failures
+            # Check if the validation is for column_count
+            if validation == "column_count":
+                failing_df = validation_function(df, expected_count)
+            else:
+                failing_df = validation_function(df, column)
+
             if failing_df.head():
                 sample_failing_rows = failing_df.limit(10).collect()
                 message = VALIDATIONS_CONFIG[validation]["message"]
@@ -91,10 +92,11 @@ def run_validations(input_file_s3_path, logs_output_path, column_validations_con
 
 if __name__ == "__main__":
     try:
-        args = getResolvedOptions(sys.argv, ['s3_path', 'validations', 'output_path'])
+        args = getResolvedOptions(sys.argv, ['s3_path', 'validations', 'output_path', 'expected_count'])
         validations_config = json.loads(args['validations'])
+        expected_count = int(args['expected_count'])
 
-        run_validations(args['s3_path'], args['output_path'], validations_config)
+        run_validations(args['s3_path'], args['output_path'], validations_config, expected_count)
     except json.JSONDecodeError:
         logging.error("Error parsing 'validations' argument. Ensure it's valid JSON.")
     except Exception as e:
