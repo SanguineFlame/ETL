@@ -60,6 +60,48 @@ VALIDATIONS_CONFIG = {
     }
 }
 
+import boto3
+from datetime import datetime
+
+
+def copy_file_with_date(source_s3_path, destination_s3_directory):
+    """
+    Copy a file from the source S3 path to the destination S3 directory with a date appended to its filename.
+
+    Parameters:
+    - source_s3_path (str): The S3 path of the source file to be copied.
+    - destination_s3_directory (str): The S3 directory where the file should be copied to.
+
+    Returns:
+    str: The new S3 path where the file was copied to.
+    """
+    # Extract the bucket and key from the source path
+    source_bucket, source_key = source_s3_path.replace("s3://", "").split("/", 1)
+
+    # Extract the filename from the key
+    filename = source_key.split("/")[-1]
+
+    # Extract the extension (if any)
+    file_extension = ""
+    if "." in filename:
+        filename, file_extension = filename.rsplit(".", 1)
+        file_extension = "." + file_extension
+
+    # Append date to the filename
+    current_date = datetime.now().strftime("%Y%m%d")
+    new_filename = f"{filename}_{current_date}{file_extension}"
+
+    # Extract the destination bucket and construct the destination key
+    destination_bucket = destination_s3_directory.replace("s3://", "").split("/")[0]
+    destination_key = f"{destination_s3_directory.replace('s3://' + destination_bucket + '/', '')}{new_filename}"
+
+    # Create an S3 client and copy the object
+    s3_client = boto3.client('s3')
+    s3_client.copy_object(Bucket=destination_bucket, CopySource={'Bucket': source_bucket, 'Key': source_key},
+                          Key=destination_key)
+
+    return f"s3://{destination_bucket}/{destination_key}"
+
 
 def log_failures(sample_failing_rows, column, validation_type, message, logs_output_path):
     if sample_failing_rows:
