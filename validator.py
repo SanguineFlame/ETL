@@ -1,113 +1,101 @@
+import logging
 import json
-import boto3
-import pandas as pd
-from awsglue.context import GlueContext
+import sys
 from pyspark.context import SparkContext
+from pyspark.sql import SparkSession
+from pyspark.sql import Row
+from awsglue.context import GlueContext
+from awsglue.utils import getResolvedOptions
 
-# Utilize the provided Spark & Glue contexts
-glueContext = GlueContext(SparkContext.getOrCreate())
-s3 = boto3.client('s3')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-
-# Fetch configuration from S3
-def fetch_config_from_s3(bucket_name, config_key):
-    config_obj = s3.get_object(Bucket=bucket_name, Key=config_key)
-    return json.load(config_obj['Body'])
-
-
-# Fetch data from S3
-def fetch_data_from_s3(s3_path):
-    return pd.read_csv(s3_path)
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = SparkSession.builder.appName("DataValidation").getOrCreate()
 
 
-# Fetch data using a Glue Connection
-def fetch_data_from_glue_connection(connection_name):
-    dynamic_frame = glueContext.create_dynamic_frame.from_catalog(connection=connection_name, database="your_database",
-                                                                  table_name="your_table")
-    return dynamic_frame.toDF()  # Converts DynamicFrame to DataFrame
+# Validation functions
+def validate_not_null(df, col_name):
+    return df.filter(f"{col_name} IS NULL")
 
 
-# Validation Functions
-def not_empty(value):
-    return value != '' and not pd.isna(value)
+def validate_is_numeric(df, col_name):
+    return df.filter(~df[col_name].rlike("^-?\\d+(\\.\\d+)?$"))
 
 
-def is_integer(value):
-    return str(value).isdigit()
+def validate_column_count(df, expected_count):
+    actual_count = len(df.columns)
+    if actual_count != expected_count:
+        error_message = f"Expected {expected_count} columns but found {actual_count} columns"
+        return spark.createDataFrame([Row(error=error_message)])
+    return spark.createDataFrame([], schema="error string")
 
 
-def is_date(value, format="%Y-%m-%d"):
-    try:
-        pd.to_datetime(value, format=format)
-        return True
-    except ValueError:
-        return False
+def validate_min_row_count(df, min_count=5):
+    sample_rows = df.limit(min_count + 1).collect()
+    actual_count = len(sample_rows)
+    if actual_count <= min_count:
+        error_message = f"Expected at least {min_count} rows but found only {actual_count} rows"
+        return spark.createDataFrame([Row(error=error_message)])
+    return spark.createDataFrame([], schema="error string")
 
 
-def is_email(value):
-    # A basic email validation check
-    if not value or pd.isna(value):
-        return False
-    return "@" in value and "." in value
+# Global validations configuration
+VALIDATIONS_CONFIG = {
+    "not_null": {
+        "function": validate_not_null,
+        "message": "Null values."
+    },
+    "is_numeric": {
+        "function": validate_is_numeric,
+        "message": "Non-numeric values."
+    },
 
+    "column_count": {
+        "function": validate_column_count,
+        "message": "Incorrect column count."
+    },
 
-VALIDATION_FUNCTIONS = {
-    "not_empty": not_empty,
-    "is_integer": is_integer,
-    "is_date": is_date,
-    "is_email": is_email
+    "min_row_count": {
+        "function": validate_min_row_count,
+        "message": "Minimum row count (5) not satisfied."
+    }
 }
 
 
-def validate_data(df, validations):
-    error_rows = []
-
-    for index, row in df.iterrows():
-        for column, rules in validations.items():
-            for rule in rules:
-                # Extract extra arguments if present, e.g., format for is_date
-                function_args = rule.get('args', [])
-                function_kwargs = rule.get('kwargs', {})
-
-                # Obtain the validation function
-                validation_function = VALIDATION_FUNCTIONS[rule['name']]
-
-                if not validation_function(row[column], *function_args, **function_kwargs):
-                    error_rows.append(index)
-
-    if error_rows:
-        raise ValueError(f"Data validation failed for rows: {error_rows}")
+def log_failures(sample_failing_rows, column, validation_type, message, logs_output_path):
+    if sample_failing_rows:
+        logging.error(f"Validation {validation_type} failed for {column}. Found {len(sample_failing_rows)} {message}.")
+        output_df = spark.createDataFrame(sample_failing_rows)
+        output_df.write.mode("overwrite").csv(f"{logs_output_path}/{column}_{validation_type}")
+    else:
+        logging.info(f"Validation {validation_type} passed for {column}. No {message} found.")
 
 
-# Configuration fetching
-BUCKET_NAME = 'testing-thangs-123'
-CONFIG_KEY = 'scripts/config.json'
-config = fetch_config_from_s3(BUCKET_NAME, CONFIG_KEY)
+def run_validations(input_file_s3_path, logs_output_path, column_validations_config):
+    df = spark.read.csv(input_file_s3_path, header=True, inferSchema=True)
 
-file_name = 'MOCK_DATA.csv'  # This would be dynamically determined based on your use case
+    for column, column_validations in column_validations_config.items():
+        for validation in column_validations:
+            validation_function = VALIDATIONS_CONFIG[validation]["function"]
+            failing_df = validation_function(df, column)
 
-# Fetching data based on source type
-source_type = config[file_name].get('source_type', 's3')  # Default to 's3' if not specified
-
-if source_type == "s3":
-    s3_path = config[file_name]['s3_path']
-    df = fetch_data_from_s3(s3_path)
-elif source_type == "database" and config[file_name]['database'] == "oracle":
-    connection_name = config[file_name]['glue_connection_name']
-    df = fetch_data_from_glue_connection(connection_name)
-
-# Column Validation
-if set(df.columns) != set(config[file_name]['expected_columns']):
-    raise ValueError(
-        f"Unexpected columns in {file_name}. Expected {config[file_name]['expected_columns']} but got {df.columns}")
-
-# Data validation based on the rules from config
-validate_data(df, config[file_name]['validations'])
+            # Only collect sample failing rows if there are failures
+            if failing_df.head():
+                sample_failing_rows = failing_df.limit(10).collect()
+                message = VALIDATIONS_CONFIG[validation]["message"]
+                log_failures(sample_failing_rows, column, validation, message, logs_output_path)
+            else:
+                logging.info(f"Validation {validation} passed for {column}. No issues found.")
 
 
-# Write the validated DataFrame directly to S3 as a single pipe-delimited CSV file
-s3_output_path = "s3://testing-thangs-123/outgoing/"
-from pyspark.sql import SparkSession
-spark = SparkSession.builder.getOrCreate()
-spark_df = spark.createDataFrame(df)
-spark_df.coalesce(1).write.option("delimiter", "|").csv(s3_output_path, mode="overwrite")
+if __name__ == "__main__":
+    try:
+        args = getResolvedOptions(sys.argv, ['s3_path', 'validations', 'output_path'])
+        validations_config = json.loads(args['validations'])
+
+        run_validations(args['s3_path'], args['output_path'], validations_config)
+    except json.JSONDecodeError:
+        logging.error("Error parsing 'validations' argument. Ensure it's valid JSON.")
+    except Exception as e:
+        logging.exception("An error occurred during execution.")
