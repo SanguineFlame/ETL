@@ -1,12 +1,12 @@
+import datetime
 import json
 import sys
-from awsglue.utils import getResolvedOptions
-from awsglue.context import GlueContext
-from pyspark.context import SparkContext
 import column_validations as col_val
 from typing import Tuple
-import boto3
-import datetime
+from awsglue.context import GlueContext
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from pyspark.sql import DataFrame
 
 sc = SparkContext()
 glueContext = GlueContext(sc)
@@ -14,8 +14,9 @@ spark = glueContext.spark_session
 
 
 def has_min_rows(df, min_rows: int) -> Tuple[bool, DataFrame]:
-    failing_rows = df if df.count() < min_rows else None
-    return failing_rows is None, failing_rows
+    count = df.count()
+    if count < min_rows:
+        return False, f"Expected at least {min_rows}, but got {count} rows."
 
 
 def has_required_columns(df, expected_cols: list) -> Tuple[bool, list]:
@@ -46,26 +47,41 @@ def load_dataset_from_s3(s3_path: str):
     return spark.read.csv(s3_path, header=True, inferSchema=True)
 
 
-def execute_validations(df, dataset_config):
+def execute_validations_specific(df, dataset_config):
     """Execute validations on the dataset based on the provided configuration."""
+
     for validation_name, parameter in dataset_config.items():
         if validation_name in VALIDATIONS:
             validation_func = VALIDATIONS[validation_name]
 
-            if isinstance(parameter, list):
-                for col in parameter:
-                    success, failing_data = validation_func(df, col)
-                    if not success:
-                        if validation_name == "expected_columns":
-                            print(f"Validation {validation_name} failed. Missing columns: {', '.join(failing_data)}")
-                        else:
-                            print(f"Validation {validation_name} failed on column {col}!")
-                            failing_data.show(5)
-            else:
+            # Handle min_rows validation
+            if validation_name == "min_rows":
                 success, failing_data = validation_func(df, parameter)
                 if not success:
                     print(f"Validation {validation_name} failed with parameter {parameter}!")
-                    failing_data.show(5)
+                    print(failing_data)
+
+            # Handle expected_columns validation
+            elif validation_name == "expected_columns":
+                success, failing_data = validation_func(df, parameter)
+                if not success:
+                    print(f"Validation {validation_name} failed with parameters {parameter}!")
+                    print(failing_data)
+
+            # Handle mandatory_values and numeric_values validations (both expect single columns)
+            elif validation_name in ["mandatory_values", "numeric_values"]:
+                for param in parameter:
+                    success, failing_data = validation_func(df, param)
+                    if not success:
+                        print(f"Validation {validation_name} failed with parameter {param}!")
+                        print(failing_data)
+
+            # Handle other validations if needed
+            else:
+                print(f"Unexpected validation: {validation_name}")
+
+
+# This approach handles each validation explicitly, based on its name.
 
 
 def run_validations_for_dataset(dataset_name: str, config_file: str = 'config.json'):
@@ -81,7 +97,7 @@ def run_validations_for_dataset(dataset_name: str, config_file: str = 'config.js
         return
 
     df = load_dataset_from_s3(s3_path)
-    execute_validations(df, dataset_config)
+    execute_validations_specific(df, dataset_config)
 
 
 args = getResolvedOptions(sys.argv, ['dataset_name'])
