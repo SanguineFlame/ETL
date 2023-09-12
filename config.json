@@ -1,0 +1,11 @@
+[
+    {
+        "dataset_name": "dataset1",
+        "s3_path": "s3://your-bucket-name/path/to/dataset1/",
+        "min_rows": 2,
+        "expected_columns": ["Name", "Age", "Address"],
+        "mandatory_values": ["Name"],
+        "numeric_values": ["Age"]
+    }
+
+]
