@@ -1,0 +1,36 @@
+def execute_validations_specific(df, dataset_config):
+    """Execute validations on the dataset based on the provided configuration."""
+
+    # Execute has_required_columns validation first
+    expected_cols = dataset_config.get("expected_columns")
+    if expected_cols:
+        success, missing_cols = has_required_columns(df, expected_cols)
+        if not success:
+            print(f"Missing columns: {', '.join(missing_cols)}")
+            return  # You can choose to return here or continue with other validations
+
+    # Execute the rest of the validations
+    for validation_name, parameter in dataset_config.items():
+        if validation_name in VALIDATIONS:
+            validation_func = VALIDATIONS[validation_name]
+
+            # Handle min_rows validation
+            if validation_name == "min_rows":
+                success, failing_data = validation_func(df, parameter)
+                if not success:
+                    print(f"Validation failed for {validation_name}: {failing_data}")
+
+            # Handle expected_columns validation (should not be executed again)
+            elif validation_name == "expected_columns":
+                continue
+
+            # Handle other validations
+            else:
+                success, failing_data = validation_func(df, parameter)
+                if not success:
+                    print(f"Validation failed for {validation_name}. Failing rows/data: {failing_data}")
+                else:
+                    print(f"Validation successful for {validation_name}")
+
+        else:
+            print(f"Unexpected validation: {validation_name}")
